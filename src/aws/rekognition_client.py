@@ -1,5 +1,5 @@
 import boto3
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from botocore.exceptions import ClientError
 import cv2
 import numpy as np
@@ -13,15 +13,29 @@ class RekognitionClient:
             region_name=aws_region
         )
 
-    def analyze_face(self, frame: np.ndarray) -> Optional[Dict[str, Any]]:
+    def analyze_frame(self, frame: np.ndarray) -> Dict[str, Any]:
+        """Analyze frame for face details and text (book content)"""
         _, buffer = cv2.imencode('.jpg', frame)
         image_bytes = buffer.tobytes()
         
         try:
-            response = self.client.detect_faces(
+            # Get face analysis
+            face_response = self.client.detect_faces(
                 Image={'Bytes': image_bytes},
                 Attributes=['ALL']
             )
-            return response
+            
+            # Get text detection (for book content)
+            text_response = self.client.detect_text(
+                Image={'Bytes': image_bytes}
+            )
+            
+            return {
+                'face_details': face_response.get('FaceDetails', []),
+                'text_details': text_response.get('TextDetections', []),
+                'frame_height': frame.shape[0],
+                'frame_width': frame.shape[1]
+            }
+            
         except ClientError as e:
             raise RuntimeError(f"AWS Rekognition error: {str(e)}")
