@@ -1,7 +1,14 @@
-from camera.camera_manager import CameraManager
-from aws.rekognition_client import RekognitionClient
-from session.session_manager import SessionManager
 import os
+import sys
+from pathlib import Path
+
+# Add project root to PYTHONPATH
+project_root = str(Path(__file__).parent.parent)
+sys.path.append(project_root)
+
+from src.camera.camera_manager import CameraManager
+from src.aws.rekognition_client import RekognitionClient
+from src.session.session_manager import SessionManager
 from dotenv import load_dotenv
 
 def main():
