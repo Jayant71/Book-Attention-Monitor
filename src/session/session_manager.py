@@ -7,7 +7,7 @@ import threading
 from queue import Queue
 from src.camera.camera_manager import CameraManager
 from src.aws.rekognition_client import RekognitionClient
-from src.analysis.attention_analyzer import AttentionAnalyzer
+from src.analysis.attention_monitor import AttentionMonitor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +19,7 @@ class SessionManager:
     def __init__(self, camera_manager: CameraManager, rekognition_client: RekognitionClient):
         self.camera_manager = camera_manager
         self.rekognition_client = rekognition_client
-        self.attention_analyzer = AttentionAnalyzer()
+        self.attention_monitor = AttentionMonitor()
         self.frame_counter = 0
         self.last_attention_data = None
         self.PROCESS_INTERVAL = 10
@@ -28,7 +28,7 @@ class SessionManager:
         logger.info("Session Manager initialized")
 
     def _process_frames(self):
-        """Background thread for processing frames through AWS Rekognition"""
+        """Background thread for processing frames through AWS Rekognition and YOLO"""
         logger.info("Starting frame processing thread")
         while self.running:
             try:
@@ -39,12 +39,15 @@ class SessionManager:
                     logger.info("Sending frame to AWS Rekognition")
                     aws_response = self.rekognition_client.analyze_frame(frame)
                     
-                    # Analyze attention
-                    logger.info("Analyzing gaze direction")
-                    self.last_attention_data = self.attention_analyzer.analyze_attention(aws_response)
+                    # Analyze attention using combined gaze and book detection
+                    logger.info("Analyzing attention status")
+                    self.last_attention_data = self.attention_monitor.analyze_attention(
+                        frame,
+                        aws_response
+                    )
                     
-                    # Log gaze information
-                    self._log_gaze_info(self.last_attention_data)
+                    # Log attention information
+                    self._log_attention_info(self.last_attention_data)
                     
                 else:
                     # Sleep briefly if no new frame
@@ -54,7 +57,7 @@ class SessionManager:
                 logger.error(f"Error processing frame: {str(e)}")
 
     def run_session(self) -> None:
-        """Run the gaze detection session"""
+        """Run the attention monitoring session"""
         try:
             logger.info("Starting camera capture session")
             self.camera_manager.start()
@@ -76,12 +79,12 @@ class SessionManager:
                         self.frame_queue.get()  # Remove old frame
                     self.frame_queue.put(frame)
                 
-                # Display frame with latest gaze information
+                # Display frame with latest attention information
                 if self.last_attention_data:
                     self.camera_manager.display_frame(frame, self.last_attention_data)
                 else:
                     # Display raw frame if no analysis yet
-                    cv2.imshow('Gaze Monitor', frame)
+                    cv2.imshow('Attention Monitor', frame)
                 
                 # Check for 'q' key to quit
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -101,20 +104,24 @@ class SessionManager:
             self.camera_manager.release()
             cv2.destroyAllWindows()
 
-    def _log_gaze_info(self, attention_data: Dict[str, Any]) -> None:
-        """Log detailed gaze information"""
+    def _log_attention_info(self, attention_data: Dict[str, Any]) -> None:
+        """Log detailed attention information"""
         if not attention_data:
             return
             
-        gaze_direction = attention_data.get('gaze_direction', 'Unknown')
-        confidence = attention_data.get('confidence', 0.0)
-        eye_direction = attention_data.get('eye_direction', {})
-        
         logger.info(
-            "Gaze Data - Direction: %s, Confidence: %.2f%%, "
-            "Yaw: %.2f, Pitch: %.2f",
-            gaze_direction,
-            confidence,
-            eye_direction.get('yaw', 0.0),
-            eye_direction.get('pitch', 0.0)
+            "Attention Status - Message: %s, Has Face: %s, Has Book: %s, Is Attentive: %s",
+            attention_data.get('message', 'Unknown'),
+            attention_data.get('has_face', False),
+            attention_data.get('has_book', False),
+            attention_data.get('is_attentive', False)
         )
+        
+        if attention_data.get('gaze_direction'):
+            gaze_dir = attention_data['gaze_direction']
+            logger.info(
+                "Gaze Direction - Yaw: %.2f, Pitch: %.2f, Confidence: %.2f%%",
+                gaze_dir.get('yaw', 0.0),
+                gaze_dir.get('pitch', 0.0),
+                gaze_dir.get('confidence', 0.0)
+            )

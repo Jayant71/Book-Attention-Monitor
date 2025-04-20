@@ -8,7 +8,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('gaze_detection.log'),
+        logging.FileHandler('attention_monitor.log'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 def main():
     try:
-        logger.info("Starting Gaze Detection Application")
+        logger.info("Starting Book Attention Monitoring System")
         
         # Load environment variables
         load_dotenv()
@@ -57,7 +57,7 @@ def main():
         session_manager = SessionManager(camera_manager, rekognition_client)
         
         # Run the session
-        logger.info("Starting gaze detection session")
+        logger.info("Starting attention monitoring session")
         session_manager.run_session()
         
     except Exception as e:

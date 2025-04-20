@@ -37,3 +37,8 @@ Thumbs.db
 .coverage
 .pytest_cache/
 htmlcov/
+runs
+
+sample.jpg
+sample.mp4
+*.zip

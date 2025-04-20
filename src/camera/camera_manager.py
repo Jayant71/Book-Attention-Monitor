@@ -90,12 +90,12 @@ class CameraManager:
         ])], (0, 0, 255))
 
     def display_frame(self, frame: np.ndarray, attention_data: dict) -> None:
-        """Display frame with gaze direction overlay"""
+        """Display frame with attention monitoring overlay"""
         display_frame = frame.copy()
         h, w = display_frame.shape[:2]
         
-        # Draw bounding box and gaze direction if face is detected
-        if attention_data['is_looking'] and attention_data['bounding_box']:
+        # Draw face bounding box and gaze direction if face is detected
+        if attention_data['has_face'] and attention_data.get('bounding_box'):
             bbox = attention_data['bounding_box']
             
             # Convert relative coordinates to absolute pixel coordinates
@@ -108,32 +108,44 @@ class CameraManager:
             cv2.rectangle(display_frame, (x, y), (x + width, y + height), (0, 255, 0), 3)
             
             # Draw 3D gaze direction arrow
-            if attention_data['eye_direction']:
+            if attention_data.get('gaze_direction'):
                 # Center point of the face
                 center_x = x + width // 2
                 center_y = y + height // 2
                 
-                yaw = attention_data['eye_direction']['yaw']
-                pitch = attention_data['eye_direction']['pitch']
+                gaze_dir = attention_data['gaze_direction']
                 
                 # Draw 3D arrow with length proportional to face size
                 arrow_length = int(max(width, height) * 1.5)
                 self._draw_3d_arrow(
                     display_frame,
                     (center_x, center_y),
-                    yaw,
-                    pitch,
+                    gaze_dir['yaw'],
+                    gaze_dir['pitch'],
                     arrow_length
                 )
         
-        # Create info panel background
-        cv2.rectangle(display_frame, (0, 0), (frame.shape[1], 120), (0, 0, 0), -1)
+        # Draw book bounding box if detected
+        if attention_data.get('book_box'):
+            book_box = attention_data['book_box']
+            x1 = int(book_box['x1'] * w)
+            y1 = int(book_box['y1'] * h)
+            x2 = int(book_box['x2'] * w)
+            y2 = int(book_box['y2'] * h)
+            
+            # Draw book bounding box in blue
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 0), 3)
+            cv2.putText(display_frame, "Book", (x1, y1 - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
         
-        # Display gaze direction status
-        status_color = (0, 255, 0) if attention_data['is_looking'] else (0, 0, 255)
+        # Create info panel background
+        cv2.rectangle(display_frame, (0, 0), (w, 140), (0, 0, 0), -1)
+        
+        # Display attention status
+        status_color = (0, 255, 0) if attention_data.get('is_attentive', False) else (0, 0, 255)
         cv2.putText(
             display_frame,
-            f"Gaze Direction: {attention_data['gaze_direction']}",
+            f"Status: {attention_data.get('message', 'Unknown')}",
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.0,
@@ -141,10 +153,11 @@ class CameraManager:
             2
         )
         
-        # Add confidence information
+        # Add face detection status
+        face_status = "Face Detected" if attention_data['has_face'] else "No Face Detected"
         cv2.putText(
             display_frame,
-            f"Confidence: {attention_data.get('confidence', 0):.1f}%",
+            face_status,
             (10, 70),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
@@ -152,13 +165,25 @@ class CameraManager:
             2
         )
         
-        # Add eye direction values
-        if attention_data.get('eye_direction'):
-            eye_dir = attention_data['eye_direction']
+        # Add book detection status
+        book_status = "Book Detected" if attention_data.get('has_book', False) else "No Book Detected"
+        cv2.putText(
+            display_frame,
+            book_status,
+            (10, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2
+        )
+        
+        # Add gaze direction values if available
+        if attention_data.get('gaze_direction'):
+            gaze_dir = attention_data['gaze_direction']
             cv2.putText(
                 display_frame,
-                f"Yaw: {eye_dir['yaw']:.1f}°, Pitch: {eye_dir['pitch']:.1f}°",
-                (10, 110),
+                f"Yaw: {gaze_dir['yaw']:.1f}°, Pitch: {gaze_dir['pitch']:.1f}°",
+                (10, 130),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
                 (255, 255, 255),
@@ -166,8 +191,35 @@ class CameraManager:
             )
         
         # Create window with properties
-        cv2.namedWindow('Gaze Monitor', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Gaze Monitor', 800, 600)
+        cv2.namedWindow('Attention Monitor', cv2.WINDOW_NORMAL)
+        
+        # Calculate scaling factor to fit the window
+        target_width = 1280
+        target_height = 960
+        
+        # Calculate scaling factors
+        scale_x = target_width / w
+        scale_y = target_height / h
+        
+        # Use the smaller scaling factor to maintain aspect ratio
+        scale = min(scale_x, scale_y)
+        
+        # Calculate new dimensions
+        new_width = int(w * scale)
+        new_height = int(h * scale)
+        
+        # Resize the frame
+        resized_frame = cv2.resize(display_frame, (new_width, new_height))
+        
+        # Create a black background
+        background = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+        
+        # Calculate position to center the resized frame
+        x_offset = (target_width - new_width) // 2
+        y_offset = (target_height - new_height) // 2
+        
+        # Place the resized frame in the center of the background
+        background[y_offset:y_offset + new_height, x_offset:x_offset + new_width] = resized_frame
         
         # Display the frame
-        cv2.imshow('Gaze Monitor', display_frame)
+        cv2.imshow('Attention Monitor', background)
