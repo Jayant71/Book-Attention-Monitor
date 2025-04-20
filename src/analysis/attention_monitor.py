@@ -7,10 +7,10 @@ import math
 logger = logging.getLogger(__name__)
 
 class AttentionMonitor:
-    def __init__(self):
-        # Initialize YOLO model for book detection (class 73 is book in COCO dataset)
-        self.yolo_model = YOLO("yolov8n")
-        logger.info("Initialized YOLO model for book detection")
+    def __init__(self, model_path: str):
+        # Initialize custom YOLO model
+        self.yolo_model = YOLO(model_path)
+        logger.info(f"Initialized custom YOLO model from {model_path}")
 
     def _calculate_gaze_line(self, face_center: Tuple[float, float], 
                            yaw: float, pitch: float, frame_shape: Tuple[int, int]) -> Tuple[np.ndarray, np.ndarray]:
@@ -19,10 +19,15 @@ class AttentionMonitor:
         yaw_rad = np.radians(yaw)
         pitch_rad = np.radians(pitch)
         
-        # Calculate direction vector
-        length = max(frame_shape) * 2  # Make line long enough to intersect with any point in frame
-        dx = length * np.sin(yaw_rad)
-        dy = length * np.sin(pitch_rad)
+        # Calculate direction vector components
+        # Note: In OpenCV, positive y is downward
+        dx = np.sin(yaw_rad)  # Horizontal component
+        dy = -np.sin(pitch_rad)  # Vertical component (negative because positive pitch looks up)
+        
+        # Scale the vector to be visible in the frame
+        length = max(frame_shape) * 0.5  # Shorter length for better visualization
+        dx *= length
+        dy *= length
         
         # Calculate end point
         end_point = np.array([
@@ -71,7 +76,7 @@ class AttentionMonitor:
     def analyze_attention(self, frame: np.ndarray, 
                          gaze_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Analyze if person is looking at a book in the frame.
+        Analyze if person is looking at an opened book in the frame.
         Returns attention status and relevant data.
         """
         h, w = frame.shape[:2]
@@ -79,6 +84,7 @@ class AttentionMonitor:
             'is_attentive': False,
             'has_face': False,
             'has_book': False,
+            'book_state': None,  # 'opened' or 'closed'
             'gaze_direction': None,
             'book_box': None,
             'message': "No face detected"
@@ -105,14 +111,18 @@ class AttentionMonitor:
             int((bbox['Top'] + bbox['Height']/2) * h)
         )
 
-        # Detect books in frame
-        yolo_results = self.yolo_model(frame, classes=[73])  # 73 is book class in COCO
+        # Detect books in frame using custom model
+        yolo_results = self.yolo_model(frame)
         
         if len(yolo_results) > 0 and len(yolo_results[0].boxes) > 0:
             attention_status['has_book'] = True
             
-            # Get book bounding box
+            # Get book bounding box and class
             box = yolo_results[0].boxes[0]  # Get first detected book
+            book_class = box.cls.item()  # Get class index
+            book_state = "opened" if book_class == 0 else "closed"
+            attention_status['book_state'] = book_state
+            
             box_data = {
                 'x1': float(box.xyxyn[0][0]),
                 'y1': float(box.xyxyn[0][1]),
@@ -137,12 +147,20 @@ class AttentionMonitor:
                 frame.shape
             )
             
-            attention_status['is_attentive'] = is_intersecting
-            attention_status['message'] = "Attentive" if is_intersecting else "Distracted"
+            # Update attention status based on book state and gaze intersection
+            if book_state == "opened" and is_intersecting:
+                attention_status['is_attentive'] = True
+                attention_status['message'] = "Attentive"
+            else:
+                attention_status['is_attentive'] = False
+                attention_status['message'] = "Distracted"
+            
             attention_status['gaze_direction'] = {
                 'yaw': eye_direction['Yaw'],
                 'pitch': eye_direction['Pitch'],
-                'confidence': eye_direction['Confidence']
+                'confidence': eye_direction['Confidence'],
+                'start_point': start_point,
+                'end_point': end_point
             }
         else:
             attention_status['message'] = "No book detected in frame"

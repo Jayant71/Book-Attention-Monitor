@@ -16,10 +16,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class SessionManager:
-    def __init__(self, camera_manager: CameraManager, rekognition_client: RekognitionClient):
+    def __init__(self, camera_manager: CameraManager, rekognition_client: RekognitionClient, model_path: str):
         self.camera_manager = camera_manager
         self.rekognition_client = rekognition_client
-        self.attention_monitor = AttentionMonitor()
+        self.attention_monitor = AttentionMonitor(model_path)
         self.frame_counter = 0
         self.last_attention_data = None
         self.PROCESS_INTERVAL = 10

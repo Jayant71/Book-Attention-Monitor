@@ -44,7 +44,11 @@ def main():
 
         # Initialize components
         logger.info("Initializing camera manager")
-        camera_manager = CameraManager()
+        source = "http://192.168.29.181:4747/video"
+        # source = 0
+        # source = "sample.mp4"
+
+        camera_manager = CameraManager(source)
         
         logger.info("Initializing AWS Rekognition client")
         rekognition_client = RekognitionClient(
@@ -54,7 +58,8 @@ def main():
         )
         
         logger.info("Initializing session manager")
-        session_manager = SessionManager(camera_manager, rekognition_client)
+        model_path = "best.onnx"
+        session_manager = SessionManager(camera_manager, rekognition_client, model_path=model_path )
         
         # Run the session
         logger.info("Starting attention monitoring session")
