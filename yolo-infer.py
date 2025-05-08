@@ -2,13 +2,13 @@ import cv2
 from ultralytics import YOLO
 
 # Load a pretrained YOLO model
-model = YOLO("yolov8n")  # load the model
+model = YOLO("yolo12s.pt")  # load the model
 
 # Define path to video file
 source = "sample.mp4"  # path to video file
 
 # Open the video
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(source)
 
 # Check if video opened successfully
 if not cap.isOpened():

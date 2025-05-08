@@ -1,6 +1,6 @@
 import numpy as np
 from ultralytics import YOLO
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
 import logging
 import math
 
@@ -8,67 +8,150 @@ logger = logging.getLogger(__name__)
 
 class AttentionMonitor:
     def __init__(self, model_path: str):
-        # Initialize custom YOLO model
+        # Load YOLO with optimization flags
         self.yolo_model = YOLO(model_path)
+        
+        # Set optimized inference parameters
+        self.yolo_conf_threshold = 0.25  # Lower confidence threshold for faster inference
+        self.yolo_iou_threshold = 0.7  # IOU threshold
+        
+        # Pre-calculate some constants for 3D calculations
+        self.z_near = 1.0
+        self.z_far = 100.0
+        self.epsilon = 1e-6  # Small value to avoid division by zero
+        
         logger.info(f"Initialized custom YOLO model from {model_path}")
 
-    def _calculate_gaze_line(self, face_center: Tuple[float, float], 
-                           yaw: float, pitch: float, frame_shape: Tuple[int, int]) -> Tuple[np.ndarray, np.ndarray]:
-        """Calculate start and end points of gaze line in image coordinates"""
+    def _calculate_3d_gaze_vector(self, pitch: float, yaw: float) -> np.ndarray:
+        """
+        Calculate 3D gaze vector from pitch and yaw angles.
+        
+        Args:
+            pitch: Pitch angle in degrees (up/down)
+            yaw: Yaw angle in degrees (left/right)
+            
+        Returns:
+            3D unit vector [x, y, z] representing gaze direction
+        """
         # Convert angles to radians
-        yaw_rad = np.radians(yaw)
         pitch_rad = np.radians(pitch)
+        yaw_rad = np.radians(yaw)
         
-        # Calculate direction vector components
-        # Note: In OpenCV, positive y is downward
-        dx = np.sin(yaw_rad)  # Horizontal component
-        dy = -np.sin(pitch_rad)  # Vertical component (negative because positive pitch looks up)
+        # Use optimized calculation (avoid redundant computations)
+        cos_pitch = np.cos(pitch_rad)
+        sin_pitch = np.sin(pitch_rad)
+        cos_yaw = np.cos(yaw_rad)
+        sin_yaw = np.sin(yaw_rad)
         
-        # Scale the vector to be visible in the frame
-        length = max(frame_shape) * 0.5  # Shorter length for better visualization
-        dx *= length
-        dy *= length
+        # Calculate 3D direction vector
+        # Standard convention: x=right, y=down, z=forward
+        x = cos_pitch * sin_yaw
+        y = sin_pitch
+        z = cos_pitch * cos_yaw
         
-        # Calculate end point
-        end_point = np.array([
-            face_center[0] + dx,
-            face_center[1] + dy
-        ])
+        # Create pre-normalized vector (avoids extra array creation)
+        vector = np.array([x, y, z], dtype=np.float32)
+        norm = np.sqrt(x*x + y*y + z*z)  # Optimized norm calculation
         
-        return np.array(face_center), end_point
+        if norm > self.epsilon:
+            vector /= norm
+            
+        return vector
 
-    def _line_box_intersection(self, start: np.ndarray, end: np.ndarray, 
-                             box: Dict[str, float], frame_shape: Tuple[int, int]) -> bool:
-        """Check if line intersects with bounding box"""
+    def _calculate_gaze_line(self, face_center: Tuple[float, float], 
+                           pitch: float, yaw: float, frame_shape: Tuple[int, int]) -> Tuple[Tuple, np.ndarray]:
+        """
+        Calculate start and end points for 3D gaze line visualization.
+        
+        Args:
+            face_center: (x, y) in image coordinates
+            pitch: Pitch angle in degrees
+            yaw: Yaw angle in degrees
+            frame_shape: (height, width) of the frame
+            
+        Returns:
+            Tuple containing:
+            - start_point: (x, y) face center in image space
+            - 3D gaze vector normalized
+            - end_point: (x, y) for visualization in image space
+        """
+        # Get 3D gaze vector
+        gaze_vector = self._calculate_3d_gaze_vector(pitch, yaw)
+        
+        # For visualization: project back to 2D
+        length = min(frame_shape[0], frame_shape[1]) * 0.3  # Use smaller dimension for better scaling
+        
+        # Optimize calculation
+        dx = length * gaze_vector[0]
+        dy = length * gaze_vector[1]
+        
+        # Calculate end point for visualization (avoid unnecessary conversions)
+        start_point = np.array(face_center, dtype=np.float32)
+        end_point = np.array([start_point[0] + dx, start_point[1] + dy], dtype=np.int32)
+        
+        return start_point, gaze_vector, end_point
+
+    def _ray_box_intersection(self, ray_origin: np.ndarray, ray_direction: np.ndarray, 
+                            box_coords: Dict[str, float], frame_shape: Tuple[int, int]) -> bool:
+        """
+        Check if a 3D ray intersects with a 2D bounding box extended to 3D.
+        Optimized version with early returns and reduced computations.
+        """
         h, w = frame_shape[:2]
         
-        # Convert relative coordinates to absolute
-        x1 = int(box['x1'] * w)
-        y1 = int(box['y1'] * h)
-        x2 = int(box['x2'] * w)
-        y2 = int(box['y2'] * h)
+        # Denormalize box coordinates to pixel values (avoid redundant calculations)
+        x1 = box_coords['x1'] * w
+        y1 = box_coords['y1'] * h
+        x2 = box_coords['x2'] * w
+        y2 = box_coords['y2'] * h
         
-        # Box corners
-        box_corners = np.array([
-            [x1, y1], [x2, y1],
-            [x2, y2], [x1, y2],
-            [x1, y1]  # Close the polygon
-        ])
+        # Convert ray_origin to 3D (avoid redundant type checks when possible)
+        ray_origin_3d = np.array([ray_origin[0], ray_origin[1], 0], dtype=np.float32) if len(ray_origin) == 2 else ray_origin
         
-        # Check intersection with each edge of the box
-        line_vec = end - start
-        for i in range(4):
-            edge_start = box_corners[i]
-            edge_end = box_corners[i + 1]
-            edge_vec = edge_end - edge_start
-            
-            # Calculate determinant
-            det = np.cross(line_vec, edge_vec)
-            if det != 0:  # Lines are not parallel
-                t = np.cross(edge_start - start, edge_vec) / det
-                u = np.cross(edge_start - start, line_vec) / det
-                
-                if 0 <= t <= 1 and 0 <= u <= 1:
+        # Optimized intersection checks - check most likely intersections first
+        # and return early when possible
+        
+        # First check X planes (left/right) - often hit first with gaze
+        if abs(ray_direction[0]) > self.epsilon:
+            t_x1 = (x1 - ray_origin_3d[0]) / ray_direction[0]
+            if t_x1 > 0:
+                intersect = ray_origin_3d + t_x1 * ray_direction
+                if (y1 <= intersect[1] <= y2 and self.z_near <= intersect[2] <= self.z_far):
+                    return True
+                    
+            t_x2 = (x2 - ray_origin_3d[0]) / ray_direction[0]
+            if t_x2 > 0:
+                intersect = ray_origin_3d + t_x2 * ray_direction
+                if (y1 <= intersect[1] <= y2 and self.z_near <= intersect[2] <= self.z_far):
+                    return True
+        
+        # Check Y planes (top/bottom)
+        if abs(ray_direction[1]) > self.epsilon:
+            t_y1 = (y1 - ray_origin_3d[1]) / ray_direction[1]
+            if t_y1 > 0:
+                intersect = ray_origin_3d + t_y1 * ray_direction
+                if (x1 <= intersect[0] <= x2 and self.z_near <= intersect[2] <= self.z_far):
+                    return True
+                    
+            t_y2 = (y2 - ray_origin_3d[1]) / ray_direction[1]
+            if t_y2 > 0:
+                intersect = ray_origin_3d + t_y2 * ray_direction
+                if (x1 <= intersect[0] <= x2 and self.z_near <= intersect[2] <= self.z_far):
+                    return True
+        
+        # Check Z planes (near/far)
+        if abs(ray_direction[2]) > self.epsilon:
+            t_z1 = (self.z_near - ray_origin_3d[2]) / ray_direction[2]
+            if t_z1 > 0:
+                intersect = ray_origin_3d + t_z1 * ray_direction
+                if (x1 <= intersect[0] <= x2 and y1 <= intersect[1] <= y2):
+                    return True
+                    
+            # Only check far plane if near plane test failed
+            t_z2 = (self.z_far - ray_origin_3d[2]) / ray_direction[2]
+            if t_z2 > 0:
+                intersect = ray_origin_3d + t_z2 * ray_direction
+                if (x1 <= intersect[0] <= x2 and y1 <= intersect[1] <= y2):
                     return True
                     
         return False
@@ -80,89 +163,136 @@ class AttentionMonitor:
         Returns attention status and relevant data.
         """
         h, w = frame.shape[:2]
+        
+        # Initialize with basic info
         attention_status = {
             'is_attentive': False,
             'has_face': False,
             'has_book': False,
-            'book_state': None,  # 'opened' or 'closed'
+            'book_state': None,
             'gaze_direction': None,
+            'face_box': None,
             'book_box': None,
             'message': "No face detected"
         }
 
-        # Check if face is detected
-        face_details = gaze_data.get('FaceDetails', [])
-        if not face_details:
+        # Check if the gaze analyzer detected a face
+        if not gaze_data.get('has_face', True):  # Default to True for backward compatibility
             return attention_status
 
-        face = face_details[0]
-        bbox = face.get('BoundingBox')
-        eye_direction = face.get('EyeDirection')
-        
-        if not bbox or not eye_direction:
-            attention_status['message'] = "Face detected but missing gaze data"
+        # Quick returns for missing data (avoid unnecessary computation)
+        pitch = gaze_data.get('pitch')
+        yaw = gaze_data.get('yaw')
+        if pitch is None or yaw is None:
             return attention_status
-
+            
+        face_bbox_coords = gaze_data.get('bbox')
         attention_status['has_face'] = True
+        attention_status['face_box'] = face_bbox_coords
         
-        # Get face center
-        face_center = (
-            int((bbox['Left'] + bbox['Width']/2) * w),
-            int((bbox['Top'] + bbox['Height']/2) * h)
+        # Calculate face center
+        if face_bbox_coords:
+            x1, y1, x2, y2 = face_bbox_coords
+            face_center = ((x1 + x2) / 2, (y1 + y2) / 2)  # Keep as float for better precision
+        else:
+            face_center = (w / 2, h / 2)
+            attention_status['message'] = "Face detected, but bbox missing. Using frame center."
+
+        # Calculate 3D gaze
+        start_point, gaze_vector, end_point = self._calculate_gaze_line(
+            face_center, pitch, yaw, frame.shape
         )
 
-        # Detect books in frame using custom model
-        yolo_results = self.yolo_model(frame)
+        # Run YOLO with optimized settings
+        yolo_results = self.yolo_model(
+            frame, 
+            verbose=False,
+            conf=self.yolo_conf_threshold,
+            iou=self.yolo_iou_threshold,
+        )
         
-        if len(yolo_results) > 0 and len(yolo_results[0].boxes) > 0:
-            attention_status['has_book'] = True
-            
-            # Get book bounding box and class
-            box = yolo_results[0].boxes[0]  # Get first detected book
-            book_class = box.cls.item()  # Get class index
-            book_state = "opened" if book_class == 0 else "closed"
-            attention_status['book_state'] = book_state
-            
-            box_data = {
-                'x1': float(box.xyxyn[0][0]),
-                'y1': float(box.xyxyn[0][1]),
-                'x2': float(box.xyxyn[0][2]),
-                'y2': float(box.xyxyn[0][3])
+        # Quick exit if no books detected
+        if len(yolo_results) == 0 or len(yolo_results[0].boxes) == 0:
+            attention_status['has_book'] = False
+            attention_status['message'] = "No book detected"
+            attention_status['gaze_direction'] = {
+                'pitch': pitch,
+                'yaw': yaw,
+                'confidence': gaze_data.get('confidence', 0.0),
+                'start_point': start_point.tolist() if isinstance(start_point, np.ndarray) else list(start_point),
+                'end_point': end_point.tolist() if isinstance(end_point, np.ndarray) else list(end_point),
+                'vector': gaze_vector.tolist()
             }
-            attention_status['book_box'] = box_data
+            return attention_status
             
-            # Calculate gaze line
-            start_point, end_point = self._calculate_gaze_line(
-                face_center,
-                eye_direction['Yaw'],
-                eye_direction['Pitch'],
-                frame.shape
-            )
+        # Book found
+        attention_status['has_book'] = True
+        
+        # Find opened books efficiently
+        opened_book_found = False
+        book_box_data = None
+        
+        # Process all detected objects
+        boxes = yolo_results[0].boxes
+        for i in range(len(boxes)):
+            box = boxes[i]
+            book_class = int(box.cls.item())
             
-            # Check if gaze intersects with book
-            is_intersecting = self._line_box_intersection(
+            # If opened book (class 0), prioritize it
+            if book_class == 0:
+                opened_book_found = True
+                attention_status['book_state'] = "opened"
+                # Get normalized coordinates [x1, y1, x2, y2]
+                coords = box.xyxyn[0].tolist()
+                book_box_data = {
+                    'x1': coords[0],
+                    'y1': coords[1],
+                    'x2': coords[2],
+                    'y2': coords[3]
+                }
+                attention_status['book_box'] = book_box_data
+                break
+        
+        # If no opened book found, use the first book (likely closed)
+        if not opened_book_found and len(boxes) > 0:
+            first_box = boxes[0]
+            attention_status['book_state'] = "closed"
+            coords = first_box.xyxyn[0].tolist()
+            book_box_data = {
+                'x1': coords[0],
+                'y1': coords[1],
+                'x2': coords[2],
+                'y2': coords[3]
+            }
+            attention_status['book_box'] = book_box_data
+            attention_status['message'] = "Closed book detected"
+            
+        # Check intersection if opened book found
+        if attention_status['book_state'] == "opened" and book_box_data:
+            # Check if 3D gaze ray intersects with book
+            is_intersecting = self._ray_box_intersection(
                 start_point,
-                end_point,
-                box_data,
+                gaze_vector,
+                book_box_data,
                 frame.shape
             )
             
-            # Update attention status based on book state and gaze intersection
-            if book_state == "opened" and is_intersecting:
+            # Update attention status based on intersection
+            if is_intersecting:
                 attention_status['is_attentive'] = True
-                attention_status['message'] = "Attentive"
+                attention_status['message'] = "Attentive (looking at open book)"
             else:
                 attention_status['is_attentive'] = False
-                attention_status['message'] = "Distracted"
+                attention_status['message'] = "Distracted (open book detected)"
             
-            attention_status['gaze_direction'] = {
-                'yaw': eye_direction['Yaw'],
-                'pitch': eye_direction['Pitch'],
-                'confidence': eye_direction['Confidence'],
-                'start_point': start_point,
-                'end_point': end_point
-            }
-        else:
-            attention_status['message'] = "No book detected in frame"
-            
+        # Store gaze info (optimize conversion to lists)
+        attention_status['gaze_direction'] = {
+            'pitch': pitch,
+            'yaw': yaw,
+            'confidence': gaze_data.get('confidence', 0.0),
+            'start_point': start_point.tolist() if isinstance(start_point, np.ndarray) else list(start_point),
+            'end_point': end_point.tolist() if isinstance(end_point, np.ndarray) else list(end_point),
+            'vector': gaze_vector.tolist()
+        }
+
         return attention_status 
